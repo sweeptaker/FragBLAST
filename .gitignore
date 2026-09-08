@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+build/
+dist/
+*.egg-info/
+
+# macOS
+.DS_Store
+.Rhistory
+.Rapp.history
+
+# Large data and intermediate results (not suitable for GitHub)
+data/*
+!data/README.md
+results/
+results_igc/
+results_ihsmgc/
+results_tara/
+results_tara_80/
+*.dmnd
+*.log
+
+# Chinese-language draft figures/scripts kept only locally
+figures/arg_counts_comparison.png
+scripts/plot_arg_counts.R

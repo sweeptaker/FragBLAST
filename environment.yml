@@ -1,0 +1,15 @@
+name: fragblast
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pytest
+  - autoconf
+  - automake
+  - libtool
+  - m4
+  - make
+  - pip
+
+# parasail Python bindings are installed separately (see README) because the
+# 1.3.4 source distribution requires a glibtoolize alias when built on macOS.

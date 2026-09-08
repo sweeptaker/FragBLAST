@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fragblast"
+version = "0.1.0"
+description = "Fragment-level protein alignment: re-align pairs, then enumerate maximal high-identity fragments that meet query/subject coverage thresholds."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "parasail>=1.3.4",
+]
+
+[project.scripts]
+fragblast = "fragblast.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["fragblast*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
