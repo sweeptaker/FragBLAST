@@ -7,10 +7,10 @@ counts_80 <- data.frame(
     levels = c("IHSMGC", "IGC", "Tara Ocean")
   ),
   type = factor(
-    c("Existing ARG", "New ARG", "Existing ARG", "New ARG", "Existing ARG", "New ARG"),
-    levels = c("Existing ARG", "New ARG")
+    c("Existing ARGs", "New ARGs", "Existing ARGs", "New ARGs", "Existing ARGs", "New ARGs"),
+    levels = c("Existing ARGs", "New ARGs")
   ),
-  count = c(5534, 857, 1176, 138, 118, 96)
+  count = c(5534, 843, 1176, 136, 118, 96)
 )
 
 labels_80 <- c(
@@ -34,7 +34,7 @@ p1 <- ggplot(counts_80, aes(x = dataset, y = count, fill = type)) +
     limits = c(0, 6500)
   ) +
   scale_fill_manual(
-    values = c("Existing ARG" = "#4C78A8", "New ARG" = "#F58518"),
+    values = c("Existing ARGs" = "#4C78A8", "New ARGs" = "#F58518"),
     name = NULL
   ) +
   labs(
@@ -60,10 +60,10 @@ counts_tara <- data.frame(
     levels = c("Identity >70%\nqcov >40%", "Identity >80%\nqcov >80%")
   ),
   type = factor(
-    c("Existing ARG", "New ARG", "Existing ARG", "New ARG"),
-    levels = c("Existing ARG", "New ARG")
+    c("Existing ARGs", "New ARGs", "Existing ARGs", "New ARGs"),
+    levels = c("Existing ARGs", "New ARGs")
   ),
-  count = c(1157, 3375, 118, 96)
+  count = c(1157, 3374, 118, 96)
 )
 
 p2 <- ggplot(counts_tara, aes(x = standard, y = count, fill = type)) +
@@ -80,7 +80,7 @@ p2 <- ggplot(counts_tara, aes(x = standard, y = count, fill = type)) +
     limits = c(0, 4000)
   ) +
   scale_fill_manual(
-    values = c("Existing ARG" = "#4C78A8", "New ARG" = "#F58518"),
+    values = c("Existing ARGs" = "#4C78A8", "New ARGs" = "#F58518"),
     name = NULL
   ) +
   labs(

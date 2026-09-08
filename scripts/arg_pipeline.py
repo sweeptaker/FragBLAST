@@ -1,32 +1,31 @@
 #!/usr/bin/env python
-"""DIAMOND + FragBLAST ARG detection pipeline.
+"""DIAMOND + FragBLAST functional-fragment discovery pipeline.
 
-Steps
------
-1. DIAMOND blastp: query (IHSMGC.pep) x subject (SARG.fasta), tabular output
-   with ``pident`` and ``qcovhsp``.
-2. Solid ARGs: query sequences with a DIAMOND hit satisfying
-   ``pident > 80`` AND ``qcovhsp > 80`` (strict).
-3. Potential ARGs: query sequences that are NOT already solid but do have a
-   DIAMOND hit with ``(pident/100) * (qcovhsp/100) > 0.64``.
-4. FragBLAST verification: re-align every potential query only against the
-   specific subjects found in step 3 (option 1 in the task).  This is always
-   at most as expensive as option 2 (all potential queries against the union
-   of those subjects), so it is the time-saving choice.
-5. New ARGs: potential queries that have at least one FragBLAST fragment with
-   percent identity > 80 and query coverage > 80 (query-only coverage mode).
+1. DIAMOND finds candidate query-subject pairs.
+2. Hard-threshold hits are reported as "solid" functional genes (ARGs in the
+   accompanying case study).
+3. Remaining pairs that satisfy two necessary conditions are treated as
+   "potential":
+   - coverage of the relevant sequence(s) is already above ``--cov``;
+   - ``pident * coverage > ident * cov`` (a necessary condition for any
+     embedded fragment that passes both hard thresholds).
+4. FragBLAST re-aligns each potential query only against its matching
+   subjects (the cheapest candidate reduction option) and enumerates maximal
+   qualifying fragments along the local alignment path.
+5. Queries with at least one qualifying fragment are reported as "new"
+   functional genes.
 
-All application thresholds are strictly greater-than, matching the task
-wording.  ``--diamond-id``/``--diamond-qcov`` are optional pre-filters passed
-straight to DIAMOND; when set to 64/64 they cannot exclude any
-``identity*coverage > 0.64`` hit, because such a hit must have both pident
-and qcovhsp strictly above 64.
+All application thresholds are strictly greater-than. Coverage is controlled
+by ``--coverage_sequence`` (query, subject, or both), and DIAMOND pre-filters
+are derived automatically from the requested thresholds instead of being set
+by hand.
 """
 
 from __future__ import annotations
 
 import argparse
 import gzip
+import math
 import multiprocessing as mp
 import shutil
 import subprocess
@@ -113,8 +112,9 @@ def run_diamond(
     out_tsv: Path,
     sensitivity: str,
     force: bool,
-    diamond_id: float,
-    diamond_qcov: float,
+    ident_pct: float,
+    cov_pct: float,
+    coverage_sequence: str,
     threads: int,
 ) -> None:
     """Run ``diamond makedb`` + ``blastp`` when outputs do not exist yet."""
@@ -142,66 +142,129 @@ def run_diamond(
 
     if not out_tsv.exists() or force:
         print(f"[2/3] diamond blastp -> {out_tsv}", flush=True)
-        outfmt = (
-            "6 qseqid sseqid pident qcovhsp length qlen slen evalue bitscore"
-        )
-        sensitivity_flag: list[str] = []
-        if sensitivity == "more-sensitive":
-            sensitivity_flag = ["--more-sensitive"]
+        outfmt_cols = [
+            "qseqid",
+            "sseqid",
+            "pident",
+            "qcovhsp",
+            "length",
+            "qlen",
+            "slen",
+            "evalue",
+            "bitscore",
+        ]
+        if coverage_sequence in ("both", "subject"):
+            outfmt_cols.append("scovhsp")
+        outfmt = "6 " + " ".join(outfmt_cols)
+        # Pre-filters are derived from the requested thresholds: a potential
+        # fragment with identity > ident and coverage > cov requires at least
+        # pident * effective_cov > ident * cov on the DIAMOND HSP.
+        pre_ident = max(1, math.floor(ident_pct * cov_pct / 100.0))
+        pre_cov = math.floor(cov_pct)
+        command = [
+            diamond,
+            "blastp",
+            "--db",
+            str(db_dmnd),
+            "--query",
+            str(query),
+            "--out",
+            str(out_tsv),
+            "--outfmt",
+            *outfmt.split(),
+            *(
+                ["--more-sensitive"]
+                if sensitivity == "more-sensitive"
+                else []
+            ),
+            "--id",
+            str(pre_ident),
+            "--query-cover",
+            str(pre_cov),
+        ]
+        if coverage_sequence in ("both", "subject"):
+            command += [
+                "--subject-cover",
+                str(pre_cov),
+            ]
+        command += [
+            "--threads",
+            str(threads),
+            "--max-target-seqs",
+            "0",  # unlimited targets, so no candidate is hidden by rank
+            "--max-hsps",
+            "100",
+        ]
         subprocess.run(
-            [
-                diamond,
-                "blastp",
-                "--db",
-                str(db_dmnd),
-                "--query",
-                str(query),
-                "--out",
-                str(out_tsv),
-                "--outfmt",
-                *outfmt.split(),
-                *sensitivity_flag,
-                "--id",
-                str(int(diamond_id)),
-                "--query-cover",
-                str(int(diamond_qcov)),
-                "--threads",
-                str(threads),
-                "--max-target-seqs",
-                "0",  # unlimited targets, so no candidate is hidden by rank
-                "--max-hsps",
-                "100",
-            ],
+            command,
             check=True,
         )
     else:
         print(f"[2/3] reuse existing DIAMOND output {out_tsv}", flush=True)
 
 
-def load_diamond_rows(path: Path) -> list[dict[str, str | float | int]]:
+def load_diamond_rows(
+    path: Path, coverage_sequence: str
+) -> list[dict[str, str | float | int]]:
     rows: list[dict[str, str | float | int]] = []
+    need_scov = coverage_sequence in ("both", "subject")
     with open(path, encoding="utf-8") as handle:
         for line in handle:
             parts = line.rstrip("\n").split("\t")
-            if len(parts) != 9:
+            if need_scov and len(parts) != 10:
+                raise ValueError(
+                    f"{path} lacks the scovhsp column; re-run DIAMOND with "
+                    "coverage_sequence=subject/both (or delete the file and "
+                    "use --force-diamond)"
+                )
+            if len(parts) not in (9, 10):
                 raise ValueError(
                     f"unexpected column count in {path}: {len(parts)}"
                 )
-            q, s, pident, qcov, length, qlen, slen, evalue, bitscore = parts
-            rows.append(
-                {
-                    "query": q,
-                    "subject": s,
-                    "pident": float(pident),
-                    "qcov": float(qcov),
-                    "length": int(length),
-                    "qlen": int(qlen),
-                    "slen": int(slen),
-                    "evalue": float(evalue),
-                    "bitscore": float(bitscore),
-                }
-            )
+            q, s, pident, qcov, length, qlen, slen, evalue, bitscore = parts[
+                :9
+            ]
+            row: dict[str, str | float | int] = {
+                "query": q,
+                "subject": s,
+                "pident": float(pident),
+                "qcov": float(qcov),
+                "length": int(length),
+                "qlen": int(qlen),
+                "slen": int(slen),
+                "evalue": float(evalue),
+                "bitscore": float(bitscore),
+            }
+            if len(parts) == 10:
+                row["scov"] = float(parts[9])
+            rows.append(row)
     return rows
+
+
+def coverage_value(
+    row: dict[str, str | float | int], coverage_sequence: str
+) -> float:
+    """Coverage used for filtering, following --coverage_sequence."""
+    if coverage_sequence == "query":
+        return float(row["qcov"])
+    if coverage_sequence == "subject":
+        return float(row.get("scov", 0.0))
+    return min(float(row["qcov"]), float(row.get("scov", 0.0)))
+
+
+def coverage_ok(
+    row: dict[str, str | float | int],
+    coverage_sequence: str,
+    cov_pct: float,
+) -> bool:
+    """True when every sequence required by coverage_sequence passes ``cov``."""
+    if coverage_sequence in ("query", "both"):
+        if float(row["qcov"]) <= cov_pct:
+            return False
+    if coverage_sequence in ("subject", "both"):
+        if float(row.get("scov", 0.0)) <= cov_pct:
+            return False
+    return True
 
 
 def write_fasta(path: Path, records: list[tuple[str, str, str]], ids) -> None:
@@ -220,7 +283,8 @@ def verify_with_fragblast(
     db_records: list[tuple[str, str, str]],
     candidate_pairs: list[dict[str, str | float | int]],
     ident_pct: float,
-    cov_pct: float,
+    qcov_pct: float,
+    scov_pct: float,
     out_tsv: Path,
     workers: int = 1,
 ) -> set[str]:
@@ -235,7 +299,8 @@ def verify_with_fragblast(
             query_by_id[row["query"]][2],
             subject_by_id[row["subject"]][2],
             ident_pct,
-            cov_pct,
+            qcov_pct,
+            scov_pct,
         )
         for row in candidate_pairs
     ]
@@ -273,7 +338,8 @@ def _verify_one_pair(task: tuple) -> tuple[str, list[str]]:
         query_seq,
         subject_seq,
         ident_pct,
-        cov_pct,
+        qcov_pct,
+        scov_pct,
     ) = task
     alignment = align_pair(query_seq, subject_seq)
     if alignment is None:
@@ -283,8 +349,8 @@ def _verify_one_pair(task: tuple) -> tuple[str, list[str]]:
         len(query_seq),
         len(subject_seq),
         identity_pct=ident_pct,
-        qcov_pct=cov_pct,   # query-only coverage for this task
-        scov_pct=0.0,
+        qcov_pct=qcov_pct,
+        scov_pct=scov_pct,
         q_offset=alignment.q_offset,
         s_offset=alignment.s_offset,
     )
@@ -349,18 +415,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--outdir", type=Path, default=ROOT / "results")
     parser.add_argument("--ident", type=float, default=80.0)
     parser.add_argument("--cov", type=float, default=80.0)
-    parser.add_argument("--product", type=float, default=0.64)
     parser.add_argument(
-        "--diamond-id",
-        type=float,
-        default=64.0,
-        help="pre-filter DIAMOND output by pident >= this value",
-    )
-    parser.add_argument(
-        "--diamond-qcov",
-        type=float,
-        default=64.0,
-        help="pre-filter DIAMOND output by qcovhsp >= this value",
+        "--coverage_sequence",
+        choices=("query", "subject", "both"),
+        default="query",
+        help=(
+            "which sequence(s) the --cov threshold applies to: query, "
+            "subject or both (default: query)"
+        ),
     )
     parser.add_argument(
         "--sensitivity",
@@ -427,8 +489,9 @@ def main(argv: list[str] | None = None) -> int:
         out_tsv=diamond_tsv,
         sensitivity=args.sensitivity,
         force=args.force_diamond,
-        diamond_id=args.diamond_id,
-        diamond_qcov=args.diamond_qcov,
+        ident_pct=args.ident,
+        cov_pct=args.cov,
+        coverage_sequence=args.coverage_sequence,
         threads=args.threads,
     )
 
@@ -437,16 +500,32 @@ def main(argv: list[str] | None = None) -> int:
     if not db_records:
         parser.error(f"no sequences found in db file {args.db}")
 
-    rows = load_diamond_rows(diamond_tsv)
+    rows = load_diamond_rows(diamond_tsv, args.coverage_sequence)
     solid_rows = [
-        r for r in rows if r["pident"] > args.ident and r["qcov"] > args.cov
+        r
+        for r in rows
+        if r["pident"] > args.ident
+        and coverage_ok(r, args.coverage_sequence, args.cov)
     ]
-    def product(r) -> float:
-        return (r["pident"] / 100.0) * (r["qcov"] / 100.0)
 
-    product_rows_all = [r for r in rows if product(r) > args.product]
+    def product(r) -> float:
+        return (r["pident"] / 100.0) * (
+            coverage_value(r, args.coverage_sequence) / 100.0
+        )
 
     solid_query_set = {r["query"] for r in solid_rows}
+    # A candidate must already cover >cov of the relevant sequence(s): no
+    # embedded fragment can exceed the coverage of the whole HSP. It must
+    # also satisfy pident * coverage > ident * cov, a necessary condition for
+    # a qualifying fragment to exist inside the HSP.
+    product_threshold = (args.ident / 100.0) * (args.cov / 100.0)
+    product_rows_all = [
+        r
+        for r in rows
+        if r["query"] not in solid_query_set
+        and coverage_ok(r, args.coverage_sequence, args.cov)
+        and product(r) > product_threshold
+    ]
     product_query_set = {r["query"] for r in product_rows_all}
     potential_query_set = product_query_set - solid_query_set
 
@@ -484,36 +563,59 @@ def main(argv: list[str] | None = None) -> int:
     write_fasta(solid_fasta, solid_records, solid_query_ids)
     write_fasta(potential_fasta, potential_records, potential_query_ids)
     with open(potential_pairs_tsv, "w", encoding="utf-8") as handle:
-        handle.write(
-            "query_id\tsubject_id\tpident\tqcovhsp\tproduct"
-            "\tlength\tqlen\tslen\tevalue\tbitscore\n"
-        )
+        cols = [
+            "query_id",
+            "subject_id",
+            "pident",
+            "qcovhsp",
+            "effective_cov",
+            "product",
+            "length",
+            "qlen",
+            "slen",
+            "evalue",
+            "bitscore",
+        ]
+        if args.coverage_sequence in ("both", "subject"):
+            cols.insert(4, "scovhsp")
+        handle.write("\t".join(cols) + "\n")
         for r in candidate_rows:
+            values = [
+                r["query"],
+                r["subject"],
+                r["pident"],
+                r["qcov"],
+            ]
+            if args.coverage_sequence in ("both", "subject"):
+                values.append(r.get("scov", ""))
+            values.extend(
+                [
+                    coverage_value(r, args.coverage_sequence),
+                    product(r),
+                    r["length"],
+                    r["qlen"],
+                    r["slen"],
+                    r["evalue"],
+                    r["bitscore"],
+                ]
+            )
             handle.write(
                 "\t".join(
                     str(v)
-                    for v in (
-                        r["query"],
-                        r["subject"],
-                        r["pident"],
-                        r["qcov"],
-                        product(r),
-                        r["length"],
-                        r["qlen"],
-                        r["slen"],
-                        r["evalue"],
-                        r["bitscore"],
-                    )
+                    for v in values
                 )
                 + "\n"
             )
 
+    qcov_pct = args.cov if args.coverage_sequence in ("query", "both") else 0.0
+    scov_pct = args.cov if args.coverage_sequence in ("subject", "both") else 0.0
     confirmed = verify_with_fragblast(
         query_records=potential_records,
         db_records=db_records,
         candidate_pairs=candidate_rows,
         ident_pct=args.ident,
-        cov_pct=args.cov,
+        qcov_pct=qcov_pct,
+        scov_pct=scov_pct,
         out_tsv=fragblast_tsv,
         workers=args.fragblast_threads,
     )
