@@ -166,9 +166,6 @@ The pipeline derives all internal settings from the requested `--ident` and
 2. `pident * coverage > ident * cov`, which is a necessary condition for any
    embedded fragment that passes both hard thresholds.
 
-DIAMOND pre-filters are generated automatically from those thresholds and do
-not need to be supplied by the user.
-
 The pipeline writes:
 
 - `solid_ARGs.fasta`: DIAMOND hits that pass the hard threshold;
